@@ -34,24 +34,27 @@ typedef itk::Image<float, 3>  WeightImage;
 namespace bender
 {
 //----------------------------------------------------------------------------
-  void GetWeightFileNames(const std::string& dirName, std::vector<std::string>& fnames)
+std::vector<std::string> GetWeightFileNames(const std::string& dirName)
 {
-  fnames.clear();
+  std::vector<std::string> fnames;
   itk::Directory::Pointer dir = itk::Directory::New();
   dir->Load(dirName.c_str());
   for(unsigned int i=0; i<dir->GetNumberOfFiles(); ++i)
     {
-    std::string name = dir->GetFile(i);
-    if(strstr(name.c_str(), ".mha"))
+    std::string fileName = dir->GetFile(i);
+    std::string prefix = "weight_";
+    std::string suffix = ".mha";
+    if (fileName.find(prefix) == 0 &&
+        fileName.find_first_of("0123456789") != std::string::npos &&
+        fileName.find(suffix) == (fileName.length() - suffix.length()) )
       {
-      std::string fname = dirName;
-      fname.append("/");
-      fname.append(name);
-      fnames.push_back(fname);
+      std::string absoluteFilePath = dirName + std::string("/") + fileName;
+      fnames.push_back(absoluteFilePath);
       }
     }
 
   std::sort(fnames.begin(), fnames.end());
+  return fnames;
 }
 
 //-------------------------------------------------------------------------------
@@ -60,7 +63,7 @@ int ReadWeights(const std::vector<std::string>& fnames, const std::vector<Weight
 {
   typedef std::vector<WeightMap::Voxel> Voxels;
   Region region;
-  int numSites = fnames.size();
+  int numSites = 0;
 
   int numInserted(0);
   for(size_t i=0; i<fnames.size(); ++i)
@@ -88,13 +91,14 @@ int ReadWeights(const std::vector<std::string>& fnames, const std::vector<Weight
       for(Voxels::const_iterator v_iter = bodyVoxels.begin(); v_iter!=bodyVoxels.end(); ++v_iter)
         {
         const WeightMap::Voxel& v(*v_iter);
-        WeightMap::SiteIndex index = static_cast<WeightMap::SiteIndex>(i);
+        WeightMap::SiteIndex index = static_cast<WeightMap::SiteIndex>(numSites);
         float value = weight_i->GetPixel(v);
         bool inserted = weightMap.Insert(v,index,value);
         numInserted+= inserted;
         }
-      std::cout << numInserted << " inserted to weight map" << std::endl;
+      std::cout << numInserted << " inserted to weight map"<< std::endl;
       weightMap.Print();
+      ++numSites;
       }
     }
   return numSites;

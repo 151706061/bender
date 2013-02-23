@@ -168,8 +168,8 @@ int main( int argc, char * argv[] )
   // Read the first weight image
   // and all file names
   //----------------------------
-  std::vector<std::string> fnames;
-  bender::GetWeightFileNames(WeightDirectory, fnames);
+  std::vector<std::string> fnames =
+    bender::GetWeightFileNames(WeightDirectory);
   int numSites = fnames.size();
   if(numSites<1)
     {
