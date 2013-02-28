@@ -37,12 +37,20 @@
       <description><![CDATA[Directiory containing the weight image files (one for each armature edge)]]></description>
     </directory>
 
+    <geometry>
+      <name>PosedSkin</name>
+      <label>Posed skin</label>
+      <description><![CDATA[Transformed skin surface]]></description>
+      <channel>input</channel>
+      <index>3</index>
+    </geometry>
+
     <image type="label">
       <name>PosedLabelmap</name>
       <label>Output Posed Labelmap</label>
       <description><![CDATA[Labelmap of the volume segmented by region according to the input armature.]]></description>
       <channel>output</channel>
-      <index>3</index>
+      <index>4</index>
     </image>
 
   </parameters>
@@ -86,6 +94,14 @@
       <label>Armature in RAS</label>
       <description><![CDATA[Whether input armature is already in the RAS(Right, Anterior, Superior) coordinate system (true) or in LPS (Left, Posterior, Superior) coordinate system (false, default). If not, it will be internally transformed into RAS.]]></description>
       <longflag>--armatureInRAS</longflag>
+      <default>false</default>
+    </boolean>
+
+    <boolean>
+      <name>IsPosedSkinInRAS</name>
+      <label>Posed skin in RAS</label>
+      <description><![CDATA[Whether input posed skin is already in the RAS(Right, Anterior, Superior) coordinate system (true) or in LPS (Left, Posterior, Superior) coordinate system (false, default). If not, it will be internally transformed into RAS.]]></description>
+      <longflag>--posedSkinInRAS</longflag>
       <default>false</default>
     </boolean>
 

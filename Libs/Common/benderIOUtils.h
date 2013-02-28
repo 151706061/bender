@@ -27,6 +27,7 @@
 
 // Bender includes
 #include "BenderCommonExport.h"
+#include <itkMesh.h>
 #include <string>
 
 class vtkPolyData;
@@ -41,6 +42,8 @@ class BENDER_COMMON_EXPORT IOUtils
   static vtkPolyData* ReadPolyData(const std::string& fileName, bool invertXY=false);
 
   static void WritePolyData(vtkPolyData* polyData, const std::string& fileName);
+  typedef itk::DefaultStaticMeshTraits<double, 3, 2, double,double> MeshTraits;
+  static itk::Mesh<double, 3,MeshTraits>::Pointer VTKPolyDataToITKMesh(vtkPolyData* input);
 
   /// Convenient method to write an itk image to disk.
   template <class ImageType>

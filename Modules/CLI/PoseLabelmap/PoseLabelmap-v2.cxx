@@ -33,16 +33,24 @@
 #include <itkImageFileWriter.h>
 #include <itkImageRegionIteratorWithIndex.h>
 #include <itkIndex.h>
+#include <itkInverseDeformationFieldImageFilter.h>
 #include <itkLinearInterpolateImageFunction.h>
 #include <itkMath.h>
 #include <itkMatrix.h>
+#include <itkNearestNeighborInterpolateImageFunction.h>
 #include <itkPluginUtilities.h>
 #include <itkStatisticsImageFilter.h>
 #include <itkThinPlateSplineKernelTransform.h>
-#include <itkTriangleMeshToBinaryImageFilter.h>
+#include <itkVector.h>
 #include <itkVersor.h>
-#include <vtkPolyDataReader.h>
-#include <vtkPolyDataWriter.h>
+#include <itkContinuousIndex.h>
+#if ITK_VERSION_MAJOR < 4
+#include <itkDeformationFieldSource.h>
+#else
+#include <itkLandmarkDisplacementFieldSource.h>
+#endif
+#include <itkResampleImageFilter.h>
+#include <itkWarpImageFilter.h>
 
 // VTK includes
 #include <vtkCellArray.h>
@@ -54,12 +62,14 @@
 #include <vtkNew.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
-#include <vtkSelectEnclosedPoints.h>
+#include <vtkPolyDataReader.h>
+#include <vtkPolyDataWriter.h>
 #include <vtkSTLReader.h>
 #include <vtkSmartPointer.h>
 #include <vtkTimerLog.h>
 
 // STD includes
+#include <cmath>
 #include <sstream>
 #include <iostream>
 #include <vector>
@@ -401,110 +411,6 @@ TransformArmature(vtkPolyData* armature,
 }
 
 //-------------------------------------------------------------------------------
-class CubeNeighborhood
-{
-public:
-  CubeNeighborhood()
-  {
-    int index=0;
-    for(unsigned int i=0; i<=1; ++i)
-      {
-      for(unsigned int j=0; j<=1; ++j)
-        {
-        for(unsigned int k=0; k<=1; ++k,++index)
-          {
-          this->Offsets[index][0] = i;
-          this->Offsets[index][1] = j;
-          this->Offsets[index][2] = k;
-          }
-        }
-      }
-  }
-  VoxelOffset Offsets[8];
-};
-
-struct OffsetDistance
-{
-  bool operator() (const VoxelOffset& offset1, const VoxelOffset& offset2)
-  {
-    size_t distance1 = offset1[0]*offset1[0] + offset1[1]*offset1[1] + offset1[2]*offset1[2];
-    size_t distance2 = offset2[0]*offset2[0] + offset2[1]*offset2[1] + offset2[2]*offset2[2];
-    return distance1 < distance2;
-  }
-};
-
-//-------------------------------------------------------------------------------
-struct GrowingNeighborhood
-{
-  GrowingNeighborhood(int maxRadius)
-  {
-    for(int i=-maxRadius; i<=maxRadius; ++i)
-      {
-      for(int j=-maxRadius; j<=maxRadius; ++j)
-        {
-        for(int k=-maxRadius; k<=maxRadius; ++k)
-          {
-          if (i == 0 && j == 0 && k == 0)
-            {
-            continue;
-            }
-          VoxelOffset offset;
-          offset[0] = i;
-          offset[1] = j;
-          offset[2] = k;
-          this->Offsets.push_back(offset);
-          }
-        }
-      }
-    std::sort(this->Offsets.begin(), this->Offsets.end(), OffsetDistance());
-  }
-  std::vector<VoxelOffset> Offsets;
-};
-
-
-//-------------------------------------------------------------------------------
-void ComputeDomainVoxels(WeightImage::Pointer image //input
-                         ,vtkPoints* points //input
-                         ,std::vector<Voxel>& domainVoxels //output
-                         )
-{
-  CubeNeighborhood cubeNeighborhood;
-  VoxelOffset* offsets = cubeNeighborhood.Offsets;
-
-  BoolImage::Pointer domain = BoolImage::New();
-  domain->CopyInformation(image);
-
-  WeightImage::RegionType region = image->GetLargestPossibleRegion();
-  domain->SetRegions(region);
-  domain->Allocate();
-  domain->FillBuffer(false);
-
-  for(int pi=0; pi<points->GetNumberOfPoints();++pi)
-    {
-    double xraw[3];
-    points->GetPoint(pi,xraw);
-
-    itk::Point<double,3> x(xraw);
-    itk::ContinuousIndex<double,3> coord;
-    image->TransformPhysicalPointToContinuousIndex(x, coord);
-
-    Voxel p;
-    p.CopyWithCast(coord);
-
-    for(int iOff=0; iOff<8; ++iOff)
-      {
-      Voxel q = p + offsets[iOff];
-
-      if(region.IsInside(q) && !domain->GetPixel(q))
-        {
-        domain->SetPixel(q,true);
-        domainVoxels.push_back(q);
-        }
-      }
-    }
-}
-
-//-------------------------------------------------------------------------------
 template<class InImage, class OutImage>
 void Allocate(typename InImage::Pointer in, typename OutImage::Pointer out)
 {
@@ -513,57 +419,8 @@ void Allocate(typename InImage::Pointer in, typename OutImage::Pointer out)
   out->Allocate();
 }
 
-/*
-//-------------------------------------------------------------------------------
-itk::Vector<double,3> Transform(const itk::Vector<double,3>& restCoord,
-                                size_t numSites,
-                                const bender::WeightMap& weightMap,
-                                bool linearBlend,
-                                const std::vector<RigidTransform>& transforms,
-                                const std::vector<Mat24>& dqs)
-{
-  itk::Vector<double,3> posedCoord(0.0);
-  bender::WeightMap::WeightVector w_pi(numSites);
-  weightMap.Get(imageIt.GetIndex(), w_pi);
-  double wSum(0.0);
-  for(size_t i = 0; i < numSites; ++i)
-    {
-    wSum+=w_pi[i];
-    }
-  if (wSum <= 0.0)
-    {
-    posedCoord = restCoord;
-    }
-  else if(linearBlend)
-    {
-    for(size_t i=0; i<numSites;++i)
-      {
-      double w = w_pi[i]/wSum;
-      const RigidTransform& Fi(transforms[i]);
-      Vec3 yi;
-      Fi.Apply(restCoord, yi);
-      posedCoord += w*yi;
-      }
-    }
-  else
-    {
-    Mat24 dq;
-    dq.Fill(0.0);
-    for(size_t i=0; i<numSites;++i)
-      {
-      double w = w_pi[i]/wSum;
-      Mat24& dq_i(dqs[i]);
-      dq+= dq_i*w;
-      }
-    Vec4 q;
-    Vec3 t;
-    DQ2QuatTrans((const double (*)[4])&dq(0,0), &q[0], &t[0]);
-    posedCoord = restCoord;
-    ApplyQT(q,t,&posedCoord[0]);
-    }
-  return posedCoord;
-  }
-*/
+// Initialized in DoIt;
+itk::Vector<double,3> InvalidCoord;
 
 //-------------------------------------------------------------------------------
 itk::Vector<double,3> Transform(const itk::Vector<double,3>& restCoord,
@@ -581,7 +438,7 @@ itk::Vector<double,3> Transform(const itk::Vector<double,3>& restCoord,
     }
   if (wSum <= 0.0)
     {
-    posedCoord = restCoord;
+    posedCoord = InvalidCoord;//restCoord;
     }
   else if(linearBlend)
     {
@@ -617,21 +474,27 @@ itk::Vector<double,3> Transform(const itk::Vector<double,3>& restCoord,
 //-------------------------------------------------------------------------------
 template <class T>
 itk::Vector<double,3> Transform(typename itk::Image<T,3>::Pointer image,
-                                typename itk::Image<T,3>::IndexType index,
+                                const itk::ContinuousIndex<double,3>& index,
                                 size_t numSites,
                                 const bender::WeightMap& weightMap,
+                                typename itk::Image<float, 3>::Pointer weightImage,
                                 bool linearBlend,
                                 const std::vector<RigidTransform>& transforms,
                                 const std::vector<Mat24>& dqs)
 {
   typename itk::Image<T,3>::PointType p;
-  image->TransformIndexToPhysicalPoint(index, p);
+  image->TransformContinuousIndexToPhysicalPoint(index, p);
   itk::Vector<double,3> restCoord(0.0);
   restCoord[0] = p[0];
   restCoord[1] = p[1];
   restCoord[2] = p[2];
   bender::WeightMap::WeightVector w_pi(numSites);
-  weightMap.Get(index, w_pi);
+  //typename itk::Image<T,3>::IndexType weightIndex;
+  //weightIndex[0] = round(index[0]);
+  //weightIndex[1] = round(index[1]);
+  //weightIndex[2] = round(index[2]);
+  //weightMap.Get(weightIndex, w_pi);
+  bender::Lerp<itk::Image<float,3> >(weightMap,index,weightImage, 0., w_pi);
   return Transform(restCoord, w_pi, linearBlend, transforms, dqs);
 }
 
@@ -697,6 +560,10 @@ public:
 template<class T>
 int DoIt(int argc, char* argv[])
 {
+  InvalidCoord[0] = std::numeric_limits<double>::max();
+  InvalidCoord[1] = std::numeric_limits<double>::max();
+  InvalidCoord[2] = std::numeric_limits<double>::max();
+
   PARSE_ARGS;
 
   if (!IsArmatureInRAS)
@@ -810,7 +677,7 @@ int DoIt(int argc, char* argv[])
 
   //if (Debug) //test whether the transform makes senses.
   //  {
-    std::cout << "############# Transform armature...";
+  std::cout << "############# Transform armature..." << std::endl;
     vtkSmartPointer<vtkPolyData> posedArmature = TransformArmature(armature,"Transforms",!IsArmatureInRAS);
     bender::IOUtils::WritePolyData(posedArmature,"./PosedArmature.vtk");
     std::cout << "############# done." << std::endl;
@@ -865,10 +732,6 @@ int DoIt(int argc, char* argv[])
 
   std::cout <<"Read "<<numSites<<" transforms"<< std::endl;
 
-  vtkSmartPointer<vtkPolyData> posedSkin;
-  posedSkin.TakeReference(bender::IOUtils::ReadPolyData(PosedSkin.c_str(),!IsPosedSkinInRAS));
-  typedef itk::Mesh<double, 3, bender::IOUtils::MeshTraits> MeshType;
-  MeshType::Pointer posedSkinMesh = bender::IOUtils::VTKPolyDataToITKMesh(posedSkin);
 
   //----------------------------
   // Output labelmap
@@ -939,198 +802,171 @@ int DoIt(int argc, char* argv[])
   posedLabelMap->Allocate();
   posedLabelMap->FillBuffer(OutsideLabel);
 
-  std::cout << "############# Posed Indexes..." << std::endl;
-  typedef typename LabelImageType::IndexType IndexType;
-  typedef itk::Image<IndexType, 3> IndexImageType;
-  typename IndexImageType::Pointer posedIndexes = IndexImageType::New();
-  posedIndexes->CopyInformation(posedLabelMap);
-  //posedIndexes->SetSpacing(posedLabelMap->GetSpacing());
-  //posedIndexes->SetDirection(posedLabelMap->GetDirection());
-  //posedIndexes->SetOrigin(origin);
-  posedIndexes->SetRegions(region);
-  posedIndexes->Allocate();
-  IndexType invalidIndex = {{-1, -1, -1}};
-  posedIndexes->FillBuffer(invalidIndex);
-
-  
-  std::cout << "############# Posed IDs..." << std::endl;
-  typedef unsigned int IDType;
-  typedef itk::Image<IDType, 3> IDImageType;
-  typename IDImageType::Pointer posedIDs = IDImageType::New();
-  posedIDs->CopyInformation(posedLabelMap);
-  posedIDs->SetRegions(region);
-  posedIDs->Allocate();
-  IDType invalidID = 0;
-  posedIDs->FillBuffer(invalidID);
-  
-
-  std::cout << "############# Binarize skin..." << std::endl;
-  typedef itk::TriangleMeshToBinaryImageFilter<MeshType, LabelImageType> BinaryFilter;
-  typename BinaryFilter::Pointer binaryFilter = BinaryFilter::New();
-  binaryFilter->SetInput(posedSkinMesh);
-  binaryFilter->SetInfoImage(posedLabelMap);
-  binaryFilter->SetOutsideValue(OutsideLabel);
-  binaryFilter->SetInsideValue(OutsideLabel + 1);
-  binaryFilter->Update();
-  std::cout << "############# done." << std::endl;
-
   //----------------------------
   // Perform interpolation
   //----------------------------
 
-  std::cout << "############# First pass..." << std::endl;
+  std::cout << "############# Compute transforms..." << std::endl;
+  typedef double VectorComponentType;
+  typedef itk::Vector<VectorComponentType,3> VectorType;
+  typedef itk::Image<VectorType,3> DeformationFieldType;
+
+/*  DeformationFieldType::Pointer deformationField = DeformationFieldType::New();
+  //deformationField->CopyInformation(labelMap);
+  deformationField->SetOrigin(labelMap->GetOrigin());
+  deformationField->SetSpacing(labelMap->GetSpacing());
+  deformationField->SetDirection(labelMap->GetDirection());
+  deformationField->SetRegions(labelMap->GetLargestPossibleRegion());
+  deformationField->Allocate();
+*/
+  typedef itk::ThinPlateSplineKernelTransform<double,3>  TransformType;
+  typedef typename TransformType::PointsContainer   LandmarkContainer;
+  typedef typename LandmarkContainer::Pointer       LandmarkContainerPointer;
+
+  // Source contains points with physical coordinates of the
+  // destination displacement fields (the inverse field)
+  LandmarkContainerPointer source = LandmarkContainer::New();
+
+  // Target contains vectors (stored as points) indicating
+  // displacement in the inverse direction.
+  LandmarkContainerPointer target = LandmarkContainer::New();
+
+  size_t backgroundVoxelCount(0);
+  size_t notTransformedVoxelCount(0);
+  size_t transformedVoxelCount(0);
+  size_t i(0);
+
   itk::ImageRegionConstIteratorWithIndex<LabelImageType> imageIt(labelMap, labelMap->GetLargestPossibleRegion());
-  // First pass, fill as much as possible
-  IDType index(0);
-  IDType assignedPixelCount(0);
-  for (index = 1; !imageIt.IsAtEnd() ; ++imageIt, ++index)
+  //itk::ImageRegionIteratorWithIndex<DeformationFieldType> deformationFieldIt(deformationField, deformationField->GetLargestPossibleRegion());
+  //for (imageIt.GoToBegin(), deformationFieldIt.GoToBegin(); !imageIt.IsAtEnd() ; ++imageIt, ++deformationFieldIt)
+  for (imageIt.GoToBegin(); !imageIt.IsAtEnd() ; ++imageIt)
     {
+    typename LabelImageType::PointType sourcePoint;
+    labelMap->TransformIndexToPhysicalPoint(imageIt.GetIndex(), sourcePoint);
+    typename LabelImageType::PointType targetPoint;
     if (imageIt.Get() == OutsideLabel)
       {
-      continue;
-      }
-    itk::Vector<double,3> posedCoord =
-      Transform<T>(labelMap, imageIt.GetIndex(), numSites, weightMap, LinearBlend, transforms, dqs);
-    //std::cout << posedCoord << std::endl;
-    typename LabelImageType::PointType posedPoint;
-    posedPoint[0] = posedCoord[0];
-    posedPoint[1] = posedCoord[1];
-    posedPoint[2] = posedCoord[2];
-    typename LabelImageType::IndexType posedIndex;
-    bool res = posedLabelMap->TransformPhysicalPointToIndex(posedPoint, posedIndex);
-    if (!res)
-      {
-      //assert(res);
-      std::cerr << "!";
+      targetPoint = sourcePoint;
+      ++backgroundVoxelCount;
       }
     else
       {
-      ++assignedPixelCount;
-      posedLabelMap->SetPixel(posedIndex, imageIt.Get());
-      posedIndexes->SetPixel(posedIndex, imageIt.GetIndex());
-      posedIDs->SetPixel(posedIndex, index);
-      //typename IDImageType::IndexType idIndex;
-      //posedIDs->TransformPhysicalPointToIndex(posedPoint, idIndex);
-      //posedIDs->SetPixel(idIndex, index);
-      //std::cout << "." << std::endl;
-      //typename IndexImageType::IndexType pPosedIndex;
-      //res = posedIndexes->TransformPhysicalPointToIndex(posedPoint, pPosedIndex);
-      //if (res)
+      itk::Vector<double,3> posedCoord =
+        Transform<T>(labelMap, imageIt.GetIndex(), numSites, weightMap, weight0, LinearBlend, transforms, dqs);
+      if (posedCoord == InvalidCoord)
         {
-        //posedIndexes->SetPixel(pPosedIndex, imageIt.GetIndex());
-        }
-      //std::cout << "-" << std::endl;
-      }
-    }
-  std::cout << "############# done." << std::endl;
-  if (Debug)
-    {
-    bender::IOUtils::WriteImage<LabelImageType>(
-      posedLabelMap, "firstPass.mha");
-    std::cout << "############# done." << std::endl;
-    }
-
-#if 1
-  // Second pass, for each empty voxel, search for its inverse transform
-  std::cout << "############# Second pass..." << std::endl;
-  itk::ImageRegionConstIteratorWithIndex<IndexImageType> posedIndexesIt(posedIndexes, posedIndexes->GetLargestPossibleRegion());
-  itk::ImageRegionIteratorWithIndex<LabelImageType> posedLabelMapIt(posedLabelMap, posedLabelMap->GetLargestPossibleRegion());
-  vtkNew<vtkSelectEnclosedPoints> selectEnclosedPoints;
-  selectEnclosedPoints->SetSurface(posedSkin);
-  vtkNew<vtkPoints> points;
-  double p[3] = {0.,0.,0.};
-  points->InsertNextPoint(p);
-  vtkNew<vtkPolyData> pointsPolyData;
-  pointsPolyData->SetPoints(points.GetPointer());
-  selectEnclosedPoints->SetInput(pointsPolyData.GetPointer());
-  GrowingNeighborhood neighbors(5);
-
-  size_t holes(0);
-  size_t insideHoles(0);
-  size_t notFound(0);
-  for (posedLabelMapIt.GoToBegin(); !posedLabelMapIt.IsAtEnd(); ++posedLabelMapIt)
-    {
-    if (posedLabelMapIt.Get() != OutsideLabel)
-      {
-      continue;
-      }
-    ++holes;
-    /*
-    typename LabelImageType::PointType posedPoint;
-    posedLabelMap->TransformIndexToPhysicalPoint(posedLabelMapIt.GetIndex(), posedPoint);
-    p[0] = posedPoint[0];
-    p[1] = posedPoint[1];
-    p[2] = posedPoint[2];
-    // is the point inside the labelmap
-    points->SetPoint(0, p);
-    points->Modified();
-    pointsPolyData->Modified();
-    selectEnclosedPoints->Update();
-    if (!selectEnclosedPoints->IsInside(0))
-      {
-      continue;
-      }
-    */
-    if ( binaryFilter->GetOutput()->GetPixel(posedLabelMapIt.GetIndex()) == OutsideLabel )
-      {
-      //continue;
-      }
-    ++insideHoles;
-    // Search for the 4 closest points
-    typedef itk::ThinPlateSplineKernelTransform<double,3>  TransformType;
-    typedef typename TransformType::PointsContainer   LandmarkContainer;
-    typedef typename LandmarkContainer::Pointer       LandmarkContainerPointer;
-    LandmarkContainerPointer source = LandmarkContainer::New();
-    LandmarkContainerPointer target = LandmarkContainer::New();
-    std::vector<IndexType> closestPoints;
-    for (size_t iOff = 0; closestPoints.size() < 4 && iOff < neighbors.Offsets.size(); ++iOff)
-      {
-      IndexType posedIndex = posedLabelMapIt.GetIndex() + neighbors.Offsets[iOff];
-      if (posedLabelMap->GetLargestPossibleRegion().IsInside(posedIndex) &&
-          posedLabelMap->GetPixel(posedIndex) != OutsideLabel &&
-          posedIndexes->GetPixel(posedIndex) != invalidIndex)
-        {
-        typename LabelImageType::PointType sourcePoint;
-        posedLabelMap->TransformIndexToPhysicalPoint(posedIndex, sourcePoint);
-        typename LabelImageType::PointType targetPoint;
-        labelMap->TransformIndexToPhysicalPoint(posedIndexes->GetPixel(posedIndex), targetPoint);
-        source->InsertElement( closestPoints.size(), sourcePoint );
-        target->InsertElement( closestPoints.size(), targetPoint );
-        closestPoints.push_back(posedIndex);
-        }
-      }
-    if (closestPoints.size() == 4)
-      {
-      TransformType::Pointer transform = TransformType::New();
-      transform->GetTargetLandmarks()->SetPoints( target );
-      transform->GetSourceLandmarks()->SetPoints( source );
-      transform->ComputeWMatrix();
-      typename LabelImageType::PointType posedPoint;
-      posedLabelMap->TransformIndexToPhysicalPoint(posedLabelMapIt.GetIndex(), posedPoint);
-      typename LabelImageType::PointType restPoint =
-        transform->TransformPoint( posedPoint );
-      IndexType restIndex;
-      bool res2 = labelMap->TransformPhysicalPointToIndex(restPoint, restIndex);
-      if (res2)
-        {
-        posedLabelMapIt.Set(labelMap->GetPixel(restIndex));
+        targetPoint = sourcePoint;
+        ++notTransformedVoxelCount;
         }
       else
         {
-        posedLabelMapIt.Set(2);
+        targetPoint[0] = posedCoord[0];
+        targetPoint[1] = posedCoord[1];
+        targetPoint[2] = posedCoord[2];
+
+        if ( transformedVoxelCount%64 == 0)
+          {
+          source->InsertElement( i, targetPoint );
+          target->InsertElement( i, sourcePoint );
+          ++ i;
+          }
+        ++transformedVoxelCount;
         }
       }
-    else
-      {
-      posedLabelMapIt.Set(68);
-      ++notFound;
-      }
+
+    //deformationFieldIt.Set(targetPoint - sourcePoint);
     }
-  std::cout << "Holes: " << holes << std::endl;
-  std::cout << "Inside: " << insideHoles << std::endl;
-  std::cout << "Not Found: " << notFound << std::endl;
   std::cout << "############# done." << std::endl;
+  std::cout << "Background: " << backgroundVoxelCount << std::endl;
+  std::cout << "Invalid: " << notTransformedVoxelCount << std::endl;
+  std::cout << "Transformed: " << transformedVoxelCount << std::endl;
+  std::cout << "i: " << i << std::endl;
+
+
+  std::cout << "############# Compute kernel..." << std::endl;
+  TransformType::Pointer transform = TransformType::New();
+  transform->GetTargetLandmarks()->SetPoints( target );
+  transform->GetSourceLandmarks()->SetPoints( source );
+  transform->ComputeWMatrix();
+  std::cout << "############# done." << std::endl;
+
+/*
+  if (Debug)
+    {
+    typedef itk::ImageFileWriter<  DeformationFieldType  > WriterType;
+    WriterType::Pointer writer = WriterType::New();
+    writer->SetInput (  deformationField );
+    writer->SetFileName( "deformation.mhd" );
+    writer->Update();
+    }
+
+  std::cout << "############# Deformation Field..." << std::endl;
+  typedef itk::InverseDeformationFieldImageFilter<DeformationFieldType, DeformationFieldType> InverseFilterType;
+  InverseFilterType::Pointer inverseFilter = InverseFilterType::New();
+  inverseFilter->SetInput(deformationField);
+  inverseFilter->SetOutputOrigin(posedLabelMap->GetOrigin());
+  inverseFilter->SetOutputSpacing(posedLabelMap->GetSpacing());
+  inverseFilter->SetOutputDirection(posedLabelMap->GetDirection());
+  inverseFilter->SetSize(posedLabelMap->GetLargestPossibleRegion().GetSize());
+  inverseFilter->SetSubsamplingFactor(16);
+  inverseFilter->Update();
+  DeformationFieldType::Pointer posedDeformationField = inverseFilter->GetOutput();
+
+  // Write the deformation field
+  if (Debug)
+    {
+    typedef itk::ImageFileWriter<  DeformationFieldType  > WriterType;
+    WriterType::Pointer writer = WriterType::New();
+    writer->SetInput (  posedDeformationField );
+    writer->SetFileName( "inverseDeformation.mhd" );
+    writer->Update();
+    }
+  //posedDeformationField->SetDirection(posedLabelMap->GetDirection());
+  std::cout << "############# done." << std::endl;
+*/
+
+/*
+  std::cout << "############# Warp image..." << std::endl;
+  typedef itk::WarpImageFilter<LabelImageType, LabelImageType, DeformationFieldType> WarpImageFilterType;
+  typename WarpImageFilterType::Pointer warpImageFilter = WarpImageFilterType::New();
+
+  typedef itk::NearestNeighborInterpolateImageFunction<LabelImageType, double> InterpolatorType;
+  typename InterpolatorType::Pointer interpolator = InterpolatorType::New();
+  warpImageFilter->SetInterpolator( interpolator );
+  warpImageFilter->SetOutputSpacing( posedLabelMap->GetSpacing() );
+  warpImageFilter->SetOutputOrigin( posedLabelMap->GetOrigin() );
+  warpImageFilter->SetOutputSize( posedLabelMap->GetLargestPossibleRegion().GetSize() );
+  warpImageFilter->SetOutputDirection( posedLabelMap->GetDirection() );
+  warpImageFilter->SetEdgePaddingValue(OutsideLabel);
+#if ITK_VERSION_MAJOR < 4
+  warpImageFilter->SetDeformationField( posedDeformationField );
+#else
+  warpImageFilter->SetDisplacementField( posedDeformationField );
 #endif
+  warpImageFilter->SetInput( labelMap );
+  warpImageFilter->Update();
+  posedLabelMap = warpImageFilter->GetOutput();
+*/
+
+  std::cout << "############# Resample image..." << std::endl;
+  typedef itk::ResampleImageFilter<LabelImageType, LabelImageType, double> ResampleImageFilterType;
+  typename ResampleImageFilterType::Pointer resampleImageFilter = ResampleImageFilterType::New();
+
+  typedef itk::NearestNeighborInterpolateImageFunction<LabelImageType, double> InterpolatorType;
+  typename InterpolatorType::Pointer interpolator = InterpolatorType::New();
+  resampleImageFilter->SetInterpolator( interpolator );
+
+  resampleImageFilter->SetOutputSpacing( posedLabelMap->GetSpacing() );
+  resampleImageFilter->SetOutputOrigin( posedLabelMap->GetOrigin() );
+  resampleImageFilter->SetOutputDirection( posedLabelMap->GetDirection() );
+  resampleImageFilter->SetDefaultPixelValue(OutsideLabel);
+  resampleImageFilter->SetTransform(transform);
+  resampleImageFilter->SetInput( labelMap );
+  resampleImageFilter->Update();
+  posedLabelMap = resampleImageFilter->GetOutput();
+
+  std::cout << "############# done." << std::endl;
+
   //----------------------------
   // Write output
   //----------------------------
